@@ -1,23 +1,6 @@
-
-#include <RCArduinoFastLib.h>
-
- // MultiChannels
-//
-// rcarduino.blogspot.com
-//
-// A simple approach for reading three RC Channels using pin change interrupts
-//
-// See related posts -
-// http://rcarduino.blogspot.co.uk/2012/01/how-to-read-rc-receiver-with.html
-// http://rcarduino.blogspot.co.uk/2012/03/need-more-interrupts-to-read-more.html
-// http://rcarduino.blogspot.co.uk/2012/01/can-i-control-more-than-x-servos-with.html
-//
-// rcarduino.blogspot.com
-//
-
-// include the pinchangeint library - see the links in the related topics section above for details
 #include <PinChangeInt.h>
 #include <Wire.h>
+#include <Servo.h>
 
 // Assign your channel in pins
 #define THROTTLE_IN_PIN 3
@@ -26,10 +9,10 @@
 #define ROLL_IN_PIN 2
 
 // Assign your channel out pins
-#define THROTTLE_OUT_PIN 8
-#define YAW_OUT_PIN 9
-#define PITCH_OUT_PIN 10
-#define ROLL_OUT_PIN 11
+#define SERVO_1 8
+#define SERVO_2 9
+#define SERVO_3 10
+#define SERVO_4 11
 
 // Assign servo indexes
 #define SERVO_THROTTLE 4
@@ -109,35 +92,36 @@ float pitchAngAcc = 0;
 float roll_F = 0;
 float pitch_F = 0;
 
-const float ACC_WEIGHT = 0.1;
-const float GYRO_WEIGHT = 0.9;
+const float rollOffset = 3.42;
+const float pitchOffset = -1.52;
+
+const float ACC_WEIGHT = 0.01;
+const float GYRO_WEIGHT = 0.99;
+
+Servo motor1;
+Servo motor2;
+Servo motor3;
+Servo motor4;
 
 void setup()
 {
   Serial.begin(115200);
   Wire.begin();
 
-  // attach servo objects, these will generate the correct
-  // pulses for driving Electronic speed controllers, servos or other devices
-  // designed to interface directly with RC Receivers
-  CRCArduinoFastServos::attach(SERVO_THROTTLE,THROTTLE_OUT_PIN);
-  CRCArduinoFastServos::attach(SERVO_YAW,YAW_OUT_PIN);
-  CRCArduinoFastServos::attach(SERVO_PITCH,PITCH_OUT_PIN);
-  CRCArduinoFastServos::attach(SERVO_ROLL,ROLL_OUT_PIN);
+  motor1.attach(SERVO_1);
+  motor2.attach(SERVO_2);
+  motor3.attach(SERVO_3);
+  motor4.attach(SERVO_4);
 
-  
- 
-  // lets set a standard rate of 50 Hz by setting a frame space of 10 * 2000 = 3 Servos + 7 times 2000
-  CRCArduinoFastServos::setFrameSpaceA(SERVO_FRAME_SPACE,6*2000);
+  dataScopeInit();
 
-  CRCArduinoFastServos::begin();
- 
   // using the PinChangeInt library, attach the interrupts
   // used to read the channels
   PCintPort::attachInterrupt(THROTTLE_IN_PIN, calcThrottle,CHANGE);
   PCintPort::attachInterrupt(YAW_IN_PIN, calcYaw,CHANGE);
   PCintPort::attachInterrupt(PITCH_IN_PIN, calcPitch,CHANGE);
   PCintPort::attachInterrupt(ROLL_IN_PIN, calcRoll,CHANGE);
+  
   getI2CData();
 }
 
@@ -222,38 +206,12 @@ void loop()
   IntegrateGyro();
   getI2CData();
   calcAngles();
-//  Serial.print(dt);
-//  Serial.print("\tAp: ");
-//  Serial.print(xGyro0);
-//  Serial.print("\t");
-//  Serial.print(xGyroF);
-//  Serial.print("\t");
-//  Serial.print(xGyroInt);
-//  Serial.print("\tGp: ");
-//  Serial.print("x: ");
-//  Serial.print(roll_F);
-//  Serial.print("\t");
-//  Serial.println(pitch_F);
-//  Serial.print("\tz: ");
-//  Serial.println(abs(zGyroF));
-//  Serial.print("\tFp: ");
-//  Serial.println(pitch_F);
 
+  if(micros() % 64 == 0)
+  {
+    serialPrint();
+  }
 
-  Serial.print(RC_CHANNEL_OUT_COUNT);
-  Serial.print("\t");
-  Serial.print(unYawIn);
-  Serial.print("\t");
-  Serial.print(unPitchIn);
-  Serial.print("\t");
-  Serial.println(unRollIn);
-
-
-  CRCArduinoFastServos::writeMicroseconds(SERVO_THROTTLE,unThrottleIn);
-  CRCArduinoFastServos::writeMicroseconds(SERVO_YAW,unThrottleIn);
-  CRCArduinoFastServos::writeMicroseconds(SERVO_PITCH,unThrottleIn);
-  CRCArduinoFastServos::writeMicroseconds(SERVO_ROLL,unThrottleIn);
-  
   
 //
 //  if(bUpdateFlags & THROTTLE_FLAG)
@@ -383,8 +341,8 @@ void getI2CData()
 
 void calcAngles()
 {
-  rollAngAcc = atan(xAcc/(float)zAcc)*180/PI;
-  pitchAngAcc = atan(yAcc/(float)zAcc)*180/PI;
+  rollAngAcc = atan(xAcc/(float)zAcc)*180/PI + rollOffset;
+  pitchAngAcc = atan(yAcc/(float)zAcc)*180/PI + pitchOffset;
   
   xGyroF = xGyro * (250 / 32767.0);
   yGyroF = yGyro * (250 / 32767.0);
@@ -398,7 +356,7 @@ void calcAngles()
 void complementary()
 {
   dt = micros() - lastMicros;
-  roll_F = ACC_WEIGHT * rollAngAcc + GYRO_WEIGHT * (roll_F + yGyroF * dt/1000000.0); 
+  roll_F = ACC_WEIGHT * rollAngAcc + GYRO_WEIGHT * (roll_F - yGyroF * dt/1000000.0); 
   pitch_F = ACC_WEIGHT * pitchAngAcc + GYRO_WEIGHT * (pitch_F + xGyroF * dt/1000000.0);
   lastMicros += dt; 
 }
