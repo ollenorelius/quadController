@@ -8,8 +8,10 @@
 #define PITCH_IN_PIN 5
 #define ROLL_IN_PIN 2
 
+#define ARM_PIN 12
+
 // Assign your channel out pins
-#define SERVO_1 8
+#define SERVO_1 6
 #define SERVO_2 9
 #define SERVO_3 10
 #define SERVO_4 11
@@ -62,13 +64,24 @@ int xAcc = 0;
 int yAcc = 0;
 int zAcc = 0;
 
+const int LPLength = 64;
+int LPIndex = 0;
+
+int xAcc_LP[LPLength];
+int yAcc_LP[LPLength];
+int zAcc_LP[LPLength];
+
 int xGyroRaw = 0;
 int yGyroRaw = 0;
 int zGyroRaw = 0;
 
-long xGyro = 0;
-long yGyro = 0;
-long zGyro = 0;
+int xGyro = 0;
+int yGyro = 0;
+int zGyro = 0;
+
+int xGyro_LP[LPLength];
+int yGyro_LP[LPLength];
+int zGyro_LP[LPLength];
 
 float xGyro0 = 0;
 float yGyro0 = 0;
@@ -84,7 +97,8 @@ const int gyroCalibLength = 500;
 int calibCount = 0;
 
 unsigned long lastMicros = 0;
-unsigned int dt = 0;
+unsigned long dt = 0;
+unsigned long comp_lastMicros = 0;
 
 float rollAngAcc = 0;
 float pitchAngAcc = 0;
@@ -92,11 +106,30 @@ float pitchAngAcc = 0;
 float roll_F = 0;
 float pitch_F = 0;
 
+
+
+float last_roll_F = 0;
+float last_pitch_F = 0;
+
 const float rollOffset = 3.42;
 const float pitchOffset = -1.52;
 
+float rollAngTarget = 0;
+float pitchAngTarget = 0;
+float yawRateTarget = 0;
+float throttleValue = 0;
+
+int rollSignal = 0;
+int pitchSignal = 0;
+int yawSignal = 0;
+int throttleSignal = 0;
+
 const float ACC_WEIGHT = 0.01;
 const float GYRO_WEIGHT = 0.99;
+
+bool armed = false;
+
+int motorSignals[] = {0,0,0,0};
 
 Servo motor1;
 Servo motor2;
@@ -113,6 +146,8 @@ void setup()
   motor3.attach(SERVO_3);
   motor4.attach(SERVO_4);
 
+  pinMode(ARM_PIN, OUTPUT);
+
   dataScopeInit();
 
   // using the PinChangeInt library, attach the interrupts
@@ -125,15 +160,17 @@ void setup()
   getI2CData();
 }
 
+uint16_t unThrottleIn;
+uint16_t unYawIn;
+uint16_t unPitchIn;
+uint16_t unRollIn;
+
 void loop()
 {
   // create local variables to hold a local copies of the channel inputs
   // these are declared static so that thier values will be retained
   // between calls to loop.
-  static uint16_t unThrottleIn;
-  static uint16_t unYawIn;
-  static uint16_t unPitchIn;
-  static uint16_t unRollIn;
+
   // local copy of update flags
   static uint8_t bUpdateFlags;
 
@@ -194,195 +231,62 @@ void loop()
   
   
   //Start Olle-code
+  static long lastI2CPoll = 0;
+  const int I2CPollInterval = 1000; //500Hz
+
+
+  if(micros() - lastI2CPoll > I2CPollInterval)
+  {
+    getI2CData();
+    lastI2CPoll = micros();
+
+    last_roll_F = roll_F;
+    last_pitch_F = pitch_F;
+    calcAngles();
+  }
+  controlSignalFilter();
+
   
   if(calibCount < gyroCalibLength)
   {
     calibGyro();
     calibCount++; 
-    Serial.println(calibCount);
+    //Serial.println(calibCount);
     xGyroInt = 0;
   }
 
-  IntegrateGyro();
-  getI2CData();
-  calcAngles();
+  //IntegrateGyro();
+  
+  
+  
+  armingStateM();
+  controlSignalCond();
+  PID();
+  calcMotorOutputs();
+  
 
-  if(micros() % 64 == 0)
+  if(armed)
+  {
+    digitalWrite(ARM_PIN,HIGH);
+    setMotorOutputs();
+  }
+  else
+  {
+    digitalWrite(ARM_PIN,LOW);
+    stopMotors();
+  }
+
+  if(micros() % 512 == 0)
   {
     serialPrint();
   }
 
-  
-//
-//  if(bUpdateFlags & THROTTLE_FLAG)
-//  {
-//    CRCArduinoFastServos::writeMicroseconds(SERVO_THROTTLE,unThrottleIn);
-//    //Serial.print("Throttle: ");
-//    //Serial.print(unThrottleIn);
-//  }
-//
-//  if(bUpdateFlags & YAW_FLAG)
-//  {
-//    CRCArduinoFastServos::writeMicroseconds(SERVO_YAW,unYawIn);
-//    //Serial.print("  Yaw: ");
-//    //Serial.print(unYawIn);
-//  }
-//
-//  if(bUpdateFlags & PITCH_FLAG)
-//  {
-//   CRCArduinoFastServos::writeMicroseconds(SERVO_PITCH,unPitchIn);
-//   //Serial.print("  Pitch: ");
-//   //Serial.print(unPitchIn);
-//  }
-//  if(bUpdateFlags & ROLL_FLAG)
-//  {
-//   CRCArduinoFastServos::writeMicroseconds(SERVO_ROLL,unRollIn);
-//   //Serial.print("  Roll: ");
-//   //Serial.println(unRollIn);
-//  }
-  
 
   bUpdateFlags = 0;
   
 }
 
 
-// simple interrupt service routine
-void calcThrottle()
-{
-  if(PCintPort::pinState)
-  {
-    unThrottleInStart = TCNT1;
-  }
-  else
-  {
-    unThrottleInShared = (TCNT1 - unThrottleInStart)>>1;
-    bUpdateFlagsShared |= THROTTLE_FLAG;
-  }
-}
-
-void calcYaw()
-{
-  if(PCintPort::pinState)
-  {
-    unYawInStart = TCNT1;
-  }
-  else
-  {
-    unYawInShared = (TCNT1 - unYawInStart)>>1;
-    bUpdateFlagsShared |= YAW_FLAG;
-  }
-}
-
-void calcPitch()
-{
-  if(PCintPort::pinState)
-  {
-    unPitchInStart = TCNT1;
-  }
-  else
-  {
-    unPitchInShared = (TCNT1 - unPitchInStart)>>1;
-    bUpdateFlagsShared |= PITCH_FLAG;  }
-}
-void calcRoll()
-{
-  if(PCintPort::pinState)
-  {
-    unRollInStart = TCNT1;
-  }
-  else
-  {
-    unRollInShared = (TCNT1 - unRollInStart)>>1;
-    bUpdateFlagsShared |= ROLL_FLAG;  }
-}
-
-void getI2CData()
-{
-  Wire.beginTransmission(ADR_IMU);
-  Wire.write(byte(59));
-  Wire.endTransmission();
-  
-  Wire.requestFrom(ADR_IMU,14);
-  
-  if (12 <= Wire.available())   // if two bytes were received
-  {
-    xAcc = Wire.read();  // receive high byte (overwrites previous reading)
-    xAcc = xAcc << 8;    // shift high byte to be high 8 bits
-    xAcc |= Wire.read(); // receive low byte as lower 8 bits
-    
-    yAcc = Wire.read();  // receive high byte (overwrites previous reading)
-    yAcc = yAcc << 8;    // shift high byte to be high 8 bits
-    yAcc |= Wire.read(); // receive low byte as lower 8 bits
-    
-    zAcc = Wire.read();  // receive high byte (overwrites previous reading)
-    zAcc = zAcc << 8;    // shift high byte to be high 8 bits
-    zAcc |= Wire.read(); // receive low byte as lower 8 bits
-
-    Wire.read(); //Dump temperature data, DOH!
-    Wire.read();    
-    
-    xGyroRaw = Wire.read();  // receive high byte (overwrites previous reading)
-    xGyroRaw = xGyroRaw << 8;    // shift high byte to be high 8 bits
-    xGyroRaw |= Wire.read(); // receive low byte as lower 8 bits
-    xGyro = xGyroRaw - xGyro0;
-    
-    yGyroRaw = Wire.read();  // receive high byte (overwrites previous reading)
-    yGyroRaw = yGyroRaw << 8;    // shift high byte to be high 8 bits
-    yGyroRaw |= Wire.read(); // receive low byte as lower 8 bits
-    yGyro = yGyroRaw - yGyro0;
-    
-    zGyroRaw = Wire.read();  // receive high byte (overwrites previous reading)
-    zGyroRaw = zGyroRaw << 8;    // shift high byte to be high 8 bits
-    zGyroRaw |= Wire.read(); // receive low byte as lower 8 bits
-    zGyro = zGyroRaw - zGyro0;
-  }
-}
-
-void calcAngles()
-{
-  rollAngAcc = atan(xAcc/(float)zAcc)*180/PI + rollOffset;
-  pitchAngAcc = atan(yAcc/(float)zAcc)*180/PI + pitchOffset;
-  
-  xGyroF = xGyro * (250 / 32767.0);
-  yGyroF = yGyro * (250 / 32767.0);
-  zGyroF = zGyro * (250 / 32767.0);
-  
-  complementary();  
-}
 
 
-
-void complementary()
-{
-  dt = micros() - lastMicros;
-  roll_F = ACC_WEIGHT * rollAngAcc + GYRO_WEIGHT * (roll_F - yGyroF * dt/1000000.0); 
-  pitch_F = ACC_WEIGHT * pitchAngAcc + GYRO_WEIGHT * (pitch_F + xGyroF * dt/1000000.0);
-  lastMicros += dt; 
-}
-
-void calibGyro()
-{
-  xGyro0 += xGyroRaw / (float)gyroCalibLength;
-  yGyro0 += yGyroRaw / (float)gyroCalibLength;
-  zGyro0 += zGyroRaw / (float)gyroCalibLength;
-}
-
-void IntegrateGyro()
-{
-  xGyroInt = xGyroInt + xGyroF *dt/1000000.0;
-}
-void SetGyroCalibration()
-{
-  byte xGyroHB = xGyro0/255;
-  byte xGyroLB = (int)xGyro0 % 0xFF00;
-  Serial.print(xGyroLB);
-  Serial.print("\t");
-  Serial.println(xGyroHB);
-  //Wire.beginTransmission(ADR_IMU);
-  //Wire.write(byte(19));
-  //Wire.write(xGyroHB);
-  //Wire.write(xGyroLB);
-  //Wire.endTransmission();
-}
 
